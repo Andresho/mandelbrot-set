@@ -17,7 +17,7 @@ mod camera;
 mod work;
 mod mandelbrot;
 
-const MAX_WORKER: usize = 8;
+const MAX_WORKER: usize = 16;
 
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 800;
@@ -50,7 +50,7 @@ fn main() -> Result<(), Error> {
         create_threads(window, more_jobs_state_receiver, thread_work_queue);
     });
 
-    create_works(&mut work_queue);
+    create_works(&mut work_queue, camera.get_state());
 
     event_loop.run(move |event, _, control_flow| {
         if input.update(&event) {
@@ -59,11 +59,30 @@ fn main() -> Result<(), Error> {
                 more_jobs_state_sender.set(false).unwrap();
                 return;
             }
+            if input.key_pressed(winit::event::VirtualKeyCode::Left) {
+                camera.go_left();
+                create_works(&mut work_queue, camera.get_state());
+            } else if input.key_pressed(winit::event::VirtualKeyCode::Right) {
+                camera.go_right();
+                create_works(&mut work_queue, camera.get_state());
+            } else if input.key_pressed(winit::event::VirtualKeyCode::Up) {
+                camera.go_up();
+                create_works(&mut work_queue, camera.get_state());
+            } else if input.key_pressed(winit::event::VirtualKeyCode::Down) {
+                camera.go_down();
+                create_works(&mut work_queue, camera.get_state());
+            } else if input.key_pressed(winit::event::VirtualKeyCode::Z) {
+                camera.zoom_in();
+                create_works(&mut work_queue, camera.get_state());;
+            } else if input.key_pressed(winit::event::VirtualKeyCode::X) {
+                camera.zoom_out();
+                create_works(&mut work_queue, camera.get_state());
+            }
         }
     });
 }
 
-fn create_works(work_queue: &mut work::WorkQueue::<work::WorkData>) {
+fn create_works(work_queue: &mut work::WorkQueue::<work::WorkData>, camera_state: camera::Camera) {
     let total_size = (WIDTH * HEIGHT) * 4;
 
     let calc_size = ((total_size as f64) / MAX_WORKER as f64) as i64;
@@ -71,9 +90,9 @@ fn create_works(work_queue: &mut work::WorkQueue::<work::WorkData>) {
         let work = work::WorkData {
             start: (i * calc_size as usize) as i64,
             size: calc_size,
-            camera_zoom: 300.0,
-            camera_x: 0.0,
-            camera_y: 0.0
+            camera_zoom: camera_state.camera_zoom,
+            camera_x: camera_state.camera_x,
+            camera_y: camera_state.camera_y
         };
         work_queue.add_work(work);
     }
