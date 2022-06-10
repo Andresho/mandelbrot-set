@@ -15,8 +15,9 @@ use std::sync::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
+mod sync_flags;
 
-const MAX_WORKER: usize = 2;
+const MAX_WORKER: usize = 8;
 
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 800;
@@ -31,16 +32,16 @@ struct Camera {
     velocity_y: i16,
     results_sender: Sender<(WorkData, Vec<u8>)>,
     results_receiver: Receiver<(WorkData, Vec<u8>)>,
-    more_jobs_state_sender: SyncFlagSender, 
-    more_jobs_state_receiver: SyncFlagReceiver
+    more_jobs_state_sender: sync_flags::SyncFlagSender,
+    more_jobs_state_receiver: sync_flags::SyncFlagReceiver
 }
 
 #[derive(Copy, Clone)]
 struct WorkData {
-    start: i64, 
-    size: i64, 
-    camera_zoom: f64, 
-    camera_x: f64, 
+    start: i64,
+    size: i64,
+    camera_zoom: f64,
+    camera_x: f64,
     camera_y: f64
 }
 
@@ -59,9 +60,9 @@ fn main() -> Result<(), Error> {
     };
 
     let (
-        mut more_jobs_state_sender, 
+        mut more_jobs_state_sender,
         more_jobs_state_receiver
-    ) = new_syncflag(true);
+    ) = sync_flags::new_syncflag(true);
 
     let mut camera = Camera::new();
 
@@ -94,7 +95,7 @@ fn escape_time(c: Complex<f64>, limit: usize) -> Option<usize> {
         }
         z = z * z + c;
     }
- 
+
     None
 }
 
@@ -103,11 +104,11 @@ fn create_works(work_queue: &mut WorkQueue::<WorkData>) {
 
     let calc_size = ((total_size as f64) / MAX_WORKER as f64) as i64;
     for i in 0..MAX_WORKER {
-        let work = WorkData { 
-            start: (i * calc_size as usize) as i64, 
-            size: calc_size, 
-            camera_zoom: 300.0, 
-            camera_x: 0.0, 
+        let work = WorkData {
+            start: (i * calc_size as usize) as i64,
+            size: calc_size,
+            camera_zoom: 300.0,
+            camera_x: 0.0,
             camera_y: 0.0
         };
         work_queue.add_work(work);
@@ -117,8 +118,11 @@ fn create_works(work_queue: &mut WorkQueue::<WorkData>) {
 impl Camera {
     fn new() -> Self {
         let (results_sender, results_receiver) = channel();
-        
-        let (mut more_jobs_state_sender, more_jobs_state_receiver) = new_syncflag(true);
+
+        let (
+            mut more_jobs_state_sender, 
+            more_jobs_state_receiver
+        ) = sync_flags::new_syncflag(true);
 
         Self {
             work_queue: WorkQueue::new(),
@@ -136,8 +140,8 @@ impl Camera {
     }
 
     // fn update(&mut self) {
-        
-    // } 
+
+    // }
 
     fn mutate_frame_with_result(frame: &mut [u8], data_transfer_result: Result<(WorkData, Vec<u8>), RecvError>) {
         match data_transfer_result {
@@ -155,11 +159,11 @@ impl Camera {
         }
     }
 
-    fn work(data: WorkData) -> Vec<u8> {        
+    fn work(data: WorkData) -> Vec<u8> {
         let mut out_obj = vec![0; data.size as usize];
         for (i, pixel) in out_obj.chunks_exact_mut(4).enumerate() {
             let real_i = i + (data.start/4) as usize;
-            
+
             let x = (real_i % WIDTH as usize) as f64 + data.camera_x;
             let y = (real_i / WIDTH as usize) as f64 + data.camera_y;
 
@@ -183,8 +187,8 @@ impl Camera {
 }
 
 fn create_threads(
-    window: Window, 
-    more_jobs_state_receiver: SyncFlagReceiver,
+    window: Window,
+    more_jobs_state_receiver: sync_flags::SyncFlagReceiver,
     work_queue: WorkQueue::<WorkData>
 ) {
     let mut threads = Vec::<JoinHandle<()>>::new();
@@ -201,7 +205,7 @@ fn create_threads(
     };
 
     let (
-        results_sender, 
+        results_sender,
         results_receiver
     ) = channel::<(WorkData, Vec<u8>)>();
 
@@ -252,8 +256,8 @@ struct WorkQueue<T: Send + Copy> {
 }
 
 impl<T: Send + Copy> WorkQueue<T> {
-    fn new() -> Self { 
-        Self { inner: Arc::new(Mutex::new(VecDeque::new())) } 
+    fn new() -> Self {
+        Self { inner: Arc::new(Mutex::new(VecDeque::new())) }
     }
 
 
@@ -276,42 +280,4 @@ impl<T: Send + Copy> WorkQueue<T> {
             panic!("WorkQueue::add_work() tried to lock a poisoned mutex");
         }
     }
-}
-
-struct SyncFlagSender {
-    inner: Arc<Mutex<bool>>,
-}
-
-impl SyncFlagSender {
-    fn set(&mut self, state: bool) -> Result<(), ()> {
-        if let Ok(mut v) = self.inner.lock() {
-            *v = state;
-            Ok(())
-        } else {
-            Err(())
-        }
-    }
-}
-
-#[derive(Clone)]
-struct SyncFlagReceiver {
-    inner: Arc<Mutex<bool>>,
-}
-
-impl SyncFlagReceiver {
-    fn get(&self) -> Result<bool, ()> {
-        if let Ok(v) = self.inner.lock() {
-            Ok(*v)
-        } else {
-            Err(())
-        }
-    }
-}
-
-fn new_syncflag(initial_state: bool) -> (SyncFlagSender, SyncFlagReceiver) {
-    let state = Arc::new(Mutex::new(initial_state));
-    let tx = SyncFlagSender { inner: state.clone() };
-    let rx = SyncFlagReceiver { inner: state.clone() };
-
-    return (tx, rx);
 }
