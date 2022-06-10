@@ -14,9 +14,9 @@ pub struct Camera {
 impl Camera {
     pub fn new() -> Self {
         Self {
-            camera_zoom: 300.0,
-            camera_x: 0.0,
-            camera_y: 0.0,
+            camera_zoom: 200.0,
+            camera_x: 100.0,
+            camera_y: 50.0,
             velocity_x: 50.0,
             velocity_y: 50.0,
             velocity_zoom: 50.0
