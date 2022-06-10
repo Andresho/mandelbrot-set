@@ -6,22 +6,33 @@ use pixels::{Error, Pixels, SurfaceTexture};
 use winit::dpi::LogicalSize;
 use winit::event::{Event, VirtualKeyCode};
 use winit::event_loop::{ControlFlow, EventLoop};
-use winit::window::WindowBuilder;
+use winit::window::{WindowBuilder, Window};
 use winit_input_helper::WinitInputHelper;
-
+use std::sync::mpsc::{channel, Sender, Receiver, RecvError};
+use std::thread::{self, JoinHandle};
 use num::Complex;
+use std::sync::Mutex;
+use std::collections::VecDeque;
+use std::sync::Arc;
+
+
+const MAX_WORKER: usize = 2;
 
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 800;
 
 struct Camera {
-    work_queue: WorkQueue<i32>,
-    threads: Vec<i32>,
+    work_queue: WorkQueue<WorkData>,
+    threads: Vec<JoinHandle<()>>,
     camera_zoom: f64,
     camera_x: f64,
     camera_y: f64,
     velocity_x: i16,
     velocity_y: i16,
+    results_sender: Sender<(WorkData, Vec<u8>)>,
+    results_receiver: Receiver<(WorkData, Vec<u8>)>,
+    more_jobs_state_sender: SyncFlagSender, 
+    more_jobs_state_receiver: SyncFlagReceiver
 }
 
 #[derive(Copy, Clone)]
@@ -47,42 +58,29 @@ fn main() -> Result<(), Error> {
             .unwrap()
     };
 
-    let mut pixels = {
-        let window_size = window.inner_size();
-        let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, &window);
-        Pixels::new(WIDTH, HEIGHT, surface_texture)?
-    };
+    let (
+        mut more_jobs_state_sender, 
+        more_jobs_state_receiver
+    ) = new_syncflag(true);
+
     let mut camera = Camera::new();
 
-    event_loop.run(move |event, _, control_flow| {
-        if let Event::RedrawRequested(_) = event {
-            camera.draw(pixels.get_frame());
-            if pixels
-                .render()
-                .map_err(|e| error!("pixels.render() failed: {}", e))
-                .is_err()
-            {
-                *control_flow = ControlFlow::Exit;
-                return;
-            }
-        }
+    let mut work_queue = WorkQueue::<WorkData>::new();
 
-        // Handle input events
+    let thread_work_queue = work_queue.clone();
+    let handle = thread::spawn(move || {
+        create_threads(window, more_jobs_state_receiver, thread_work_queue);
+    });
+
+    create_works(&mut work_queue);
+
+    event_loop.run(move |event, _, control_flow| {
         if input.update(&event) {
-            // Close events
             if input.key_pressed(VirtualKeyCode::Escape) || input.quit() {
                 *control_flow = ControlFlow::Exit;
+                more_jobs_state_sender.set(false).unwrap();
                 return;
             }
-
-            // Resize the window
-            if let Some(size) = input.window_resized() {
-                pixels.resize_surface(size.width, size.height);
-            }
-
-            // Update internal state and request a redraw
-            camera.update();
-            window.request_redraw();
         }
     });
 }
@@ -100,21 +98,28 @@ fn escape_time(c: Complex<f64>, limit: usize) -> Option<usize> {
     None
 }
 
-use std::sync::mpsc::channel;
-use std::thread;
+fn create_works(work_queue: &mut WorkQueue::<WorkData>) {
+    let total_size = (WIDTH * HEIGHT) * 4;
 
-
+    let calc_size = ((total_size as f64) / MAX_WORKER as f64) as i64;
+    for i in 0..MAX_WORKER {
+        let work = WorkData { 
+            start: (i * calc_size as usize) as i64, 
+            size: calc_size, 
+            camera_zoom: 300.0, 
+            camera_x: 0.0, 
+            camera_y: 0.0
+        };
+        work_queue.add_work(work);
+    }
+}
 
 impl Camera {
     fn new() -> Self {
-        let (results_tx, results_rx) = channel();
-    
-        let (mut more_jobs_tx, more_jobs_rx) = new_syncflag(true);
-    
-        let mut threads = Vec::new();
-    
-        println!("Spawning {} workers.", MAX_WORKER);
+        let (results_sender, results_receiver) = channel();
         
+        let (mut more_jobs_state_sender, more_jobs_state_receiver) = new_syncflag(true);
+
         Self {
             work_queue: WorkQueue::new(),
             threads: Vec::new(),
@@ -122,69 +127,41 @@ impl Camera {
             camera_x: 200.0,
             camera_y: 0.0,
             velocity_x: 1,
-            velocity_y: 1
+            velocity_y: 1,
+            results_sender: results_sender,
+            results_receiver: results_receiver,
+            more_jobs_state_sender: more_jobs_state_sender,
+            more_jobs_state_receiver: more_jobs_state_receiver
         }
     }
 
-    fn update(&mut self) {
+    // fn update(&mut self) {
         
-    } 
+    // } 
 
-    fn create_threads(&self) {
-        let queue = WorkQueue::<WorkData>::new();
+    fn mutate_frame_with_result(frame: &mut [u8], data_transfer_result: Result<(WorkData, Vec<u8>), RecvError>) {
+        match data_transfer_result {
+            Ok((data, result)) => {
+                let start = data.start as usize;
+                let end = (data.start + data.size) as usize;
 
-        use std::sync::mpsc::channel;
-        let (results_tx, results_rx) = channel();
+                let frame_slice: &mut [u8] = &mut frame[start..end];
 
-        let (mut more_jobs_tx, more_jobs_rx) = new_syncflag(true);
-
-        use std::thread;
-        let mut threads = Vec::new();
-
-        println!("Spawning {} workers.", MAX_WORKER);
-
-        for thread_num in 0..MAX_WORKER {
-            let thread_queue = queue.clone();
-
-            let thread_results_tx = results_tx.clone();
-
-            let thread_more_jobs_rx = more_jobs_rx.clone();
-
-            let handle = thread::spawn(move || {
-                let mut work_done = 0;
-
-                while thread_more_jobs_rx.get().unwrap() {
-
-                    if let Some(data) = thread_queue.get_work() {
-                        let result = Camera::work(data);
-
-                        work_done += 1;
-
-                        match thread_results_tx.send((data, result)) {
-                            Ok(_) => (),
-                            Err(_) => { break; },
-                        }
-
-                    }
-
-                    std::thread::yield_now();
-                }
-
-                println!("Thread {} did {} jobs.", thread_num, work_done);
-            });
-
-            threads.push(handle);
+                frame_slice.copy_from_slice(&result);
+            },
+            Err(_) => {
+                panic!("WorkQueue::get_work() tried to lock a poisoned mutex");
+            }
         }
     }
 
-    fn work(data: WorkData) {
-        let end = data.start + data.size/4;
-        
-        let mut out_obj = vec![0; (data.size as usize)];
-
+    fn work(data: WorkData) -> Vec<u8> {        
+        let mut out_obj = vec![0; data.size as usize];
         for (i, pixel) in out_obj.chunks_exact_mut(4).enumerate() {
-            let x = (i % WIDTH as usize) as f64 + data.camera_x;
-            let y = (i / WIDTH as usize) as f64 + data.camera_y;
+            let real_i = i + (data.start/4) as usize;
+            
+            let x = (real_i % WIDTH as usize) as f64 + data.camera_x;
+            let y = (real_i / WIDTH as usize) as f64 + data.camera_y;
 
             let point = Complex {
                 re: ((((WIDTH as f64)/2.0) - x as f64))/data.camera_zoom,
@@ -201,52 +178,74 @@ impl Camera {
             pixel.copy_from_slice(&rgba);
         }
 
-        out_obj;
+        out_obj
     }
-
-    work_queue
-    fn draw(&self, frame: &mut [u8]) {
-        let split_size = frame.len() / 4;
-
-        for i in 0..split_size {
-            self.work_queue.add_work(work);
-        }
-    }
-
-    // fn draw_old(&self, frame: &mut [u8]) {
-    //     let camera_zoom = 500.0 * self.camera_zoom;
-
-    //     for (i, pixel) in frame.chunks_exact_mut(4).enumerate() {
-    //         let x = (i % WIDTH as usize) as f64 + self.camera_x;
-    //         let y = (i / WIDTH as usize) as f64 + self.camera_y;
-
-    //         let point = Complex {
-    //             re: ((((WIDTH as f64)/2.0) - x as f64))/camera_zoom,
-    //             im: ((((WIDTH as f64)/2.0) - y as f64))/camera_zoom
-    //         };
-
-    //         let color = match escape_time(point, 255) {
-    //             None => 100,
-    //             Some(count) => 255 - count as u8
-    //         };
-
-    //         let rgba = [color, color, color, color];
-
-    //         pixel.copy_from_slice(&rgba);
-    //     }
-    // }
 }
 
+fn create_threads(
+    window: Window, 
+    more_jobs_state_receiver: SyncFlagReceiver,
+    work_queue: WorkQueue::<WorkData>
+) {
+    let mut threads = Vec::<JoinHandle<()>>::new();
 
+    let mut pixels = match {
+        let window_size = window.inner_size();
+        let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, &window);
+        Pixels::new(WIDTH, HEIGHT, surface_texture)
+    } {
+        Ok(p) => {p},
+        Err(_) => {
+            panic!("Error creating pixels");
+        }
+    };
 
+    let (
+        results_sender, 
+        results_receiver
+    ) = channel::<(WorkData, Vec<u8>)>();
 
+    for thread_num in 0..MAX_WORKER {
+        let thread_queue = work_queue.clone();
 
-const MAX_WORKER: usize = 4;
-use std::sync::Mutex;
-use std::collections::VecDeque;
-use std::sync::Arc;
+        let thread_results_sender = results_sender.clone();
 
+        let thread_more_jobs_receiver = more_jobs_state_receiver.clone();
 
+        let handle = thread::spawn(move || {
+            while thread_more_jobs_receiver.get().unwrap() {
+
+                if let Some(data) = thread_queue.get_work() {
+                    let result = Camera::work(data);
+
+                    match thread_results_sender.send((data, result)) {
+                        Ok(_) => (),
+                        Err(_) => { break; },
+                    }
+
+                }
+
+                std::thread::yield_now();
+            }
+        });
+
+        threads.push(handle);
+    }
+
+    while more_jobs_state_receiver.get().unwrap() {
+        let data_transfer_result = results_receiver.recv();
+        Camera::mutate_frame_with_result(pixels.get_frame(), data_transfer_result);
+        let res = pixels
+            .render()
+            .map_err(|e| error!("pixels.render() failed: {}", e))
+            .is_err();
+        window.request_redraw();
+    }
+
+    for handle in threads {
+        handle.join().unwrap();
+    }
+}
 #[derive(Clone)]
 struct WorkQueue<T: Send + Copy> {
     inner: Arc<Mutex<VecDeque<T>>>,
@@ -279,11 +278,11 @@ impl<T: Send + Copy> WorkQueue<T> {
     }
 }
 
-struct SyncFlagTx {
+struct SyncFlagSender {
     inner: Arc<Mutex<bool>>,
 }
 
-impl SyncFlagTx {
+impl SyncFlagSender {
     fn set(&mut self, state: bool) -> Result<(), ()> {
         if let Ok(mut v) = self.inner.lock() {
             *v = state;
@@ -295,11 +294,11 @@ impl SyncFlagTx {
 }
 
 #[derive(Clone)]
-struct SyncFlagRx {
+struct SyncFlagReceiver {
     inner: Arc<Mutex<bool>>,
 }
 
-impl SyncFlagRx {
+impl SyncFlagReceiver {
     fn get(&self) -> Result<bool, ()> {
         if let Ok(v) = self.inner.lock() {
             Ok(*v)
@@ -309,107 +308,10 @@ impl SyncFlagRx {
     }
 }
 
-fn new_syncflag(initial_state: bool) -> (SyncFlagTx, SyncFlagRx) {
+fn new_syncflag(initial_state: bool) -> (SyncFlagSender, SyncFlagReceiver) {
     let state = Arc::new(Mutex::new(initial_state));
-    let tx = SyncFlagTx { inner: state.clone() };
-    let rx = SyncFlagRx { inner: state.clone() };
+    let tx = SyncFlagSender { inner: state.clone() };
+    let rx = SyncFlagReceiver { inner: state.clone() };
 
     return (tx, rx);
-}
-
-
-
-// fn create_threads() {results_tx
-//     use std::sync::mpsc::channel;
-//     let (results_tx, results_rx) = channel();
-
-//     use std::thread;
-//     let mut threads = Vec::new();
-// }
-
-
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-
-fn main_2() {
-    let queue = WorkQueue::new();
-
-    use std::sync::mpsc::channel;
-    let (results_tx, results_rx) = channel();
-
-    let (mut more_jobs_tx, more_jobs_rx) = new_syncflag(true);
-
-    use std::thread;
-    let mut threads = Vec::new();
-
-    println!("Spawning {} workers.", MAX_WORKER);
-
-    for thread_num in 0..MAX_WORKER {
-        let thread_queue = queue.clone();
-
-        let thread_results_tx = results_tx.clone();
-
-        let thread_more_jobs_rx = more_jobs_rx.clone();
-
-        let handle = thread::spawn(move || {
-            let mut work_done = 0;
-
-            while thread_more_jobs_rx.get().unwrap() {
-
-                if let Some(work) = thread_queue.get_work() {
-                    let result = fib(work);
-
-                    work_done += 1;
-
-                    match thread_results_tx.send((work, result)) {
-                        Ok(_) => (),
-                        Err(_) => { break; },
-                    }
-
-                }
-
-                std::thread::yield_now();
-            }
-
-            println!("Thread {} did {} jobs.", thread_num, work_done);
-        });
-
-        threads.push(handle);
-    }
-
-    println!("Workers successfully started.");
-
-    println!("Adding jobs to the queue.");
-    
-    let mut jobs_remaining = 0;
-    let mut jobs_total = 0;
-
-    for work in 0..90 {
-        for _ in 0..100 {
-            jobs_remaining = queue.add_work(work);
-            jobs_total += 1;
-        }
-    }
-
-    println!("Total of {} jobs inserted into the queue ({} remaining at this time).", 
-             jobs_total,
-             jobs_remaining);
-
-    while jobs_total > 0 {
-        match results_rx.recv() {
-            Ok(_) => { jobs_total -= 1 },
-            Err(_) => {panic!("All workers died unexpectedly.");}
-        }
-    }
-
-    more_jobs_tx.set(false).unwrap();
-
-    for handle in threads {
-        handle.join().unwrap();
-    }
 }
