@@ -2,11 +2,10 @@
 #![forbid(unsafe_code)]
 
 use log::error;
-use pixels::{Error, Pixels, SurfaceTexture};
-use winit::dpi::LogicalSize;
+use pixels::{Error};
 use winit::event::{VirtualKeyCode};
 use winit::event_loop::{ControlFlow, EventLoop};
-use winit::window::{WindowBuilder, Window};
+use winit::window::{Window};
 use winit_input_helper::WinitInputHelper;
 use work::thread_work;
 use std::sync::mpsc::{channel};
@@ -16,8 +15,9 @@ mod sync_flags;
 mod camera;
 mod work;
 mod mandelbrot;
+mod screen;
 
-const MAX_WORKER: usize = 16;
+const MAX_WORKER: usize = 8;
 
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 800;
@@ -25,15 +25,7 @@ const HEIGHT: u32 = 800;
 fn main() -> Result<(), Error> {
     let event_loop = EventLoop::new();
     let mut input = WinitInputHelper::new();
-    let window = {
-        let size = LogicalSize::new(WIDTH as f64, HEIGHT as f64);
-        WindowBuilder::new()
-            .with_title("Mandelbrot-set")
-            .with_inner_size(size)
-            .with_min_inner_size(size)
-            .build(&event_loop)
-            .unwrap()
-    };
+    let window = screen::create_window(&event_loop, WIDTH, HEIGHT);
 
     let (
         mut more_jobs_state_sender,
@@ -72,7 +64,7 @@ fn main() -> Result<(), Error> {
                 create_works(&mut work_queue, camera.get_state());
             } else if input.key_pressed(winit::event::VirtualKeyCode::Z) {
                 camera.zoom_in();
-                create_works(&mut work_queue, camera.get_state());;
+                create_works(&mut work_queue, camera.get_state());
             } else if input.key_pressed(winit::event::VirtualKeyCode::X) {
                 camera.zoom_out();
                 create_works(&mut work_queue, camera.get_state());
@@ -104,16 +96,7 @@ fn create_threads(
 ) {
     let mut threads = Vec::<JoinHandle<()>>::new();
 
-    let mut pixels = match {
-        let window_size = window.inner_size();
-        let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, &window);
-        Pixels::new(WIDTH, HEIGHT, surface_texture)
-    } {
-        Ok(p) => {p},
-        Err(_) => {
-            panic!("Error creating pixels");
-        }
-    };
+    let mut pixels = screen::create_pixels(&window, WIDTH, HEIGHT);
 
     let (
         results_sender,
