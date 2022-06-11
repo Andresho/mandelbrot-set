@@ -17,7 +17,7 @@ mod work;
 mod mandelbrot;
 mod screen;
 
-const MAX_WORKER: usize = 8;
+const MAX_WORKER: usize = 16;
 
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 800;
@@ -132,7 +132,7 @@ fn create_threads(
 
     while more_jobs_state_receiver.get().unwrap() {
         let data_transfer_result = results_receiver.recv();
-        camera::Camera::mutate_frame_with_result(pixels.get_frame(), data_transfer_result);
+        screen::mutate_frame_with_result(pixels.get_frame(), data_transfer_result);
         
         let _res = pixels
             .render()

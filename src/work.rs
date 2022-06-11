@@ -57,7 +57,7 @@ pub fn thread_work(data: WorkData, width: usize) -> Vec<u8> {
         };
 
         let color = match escape_time(point, 255) {
-            None => 100,
+            None => 0,
             Some(count) => 255 - count as u8
         };
 

@@ -1,7 +1,3 @@
-use std::{sync::mpsc::{RecvError}};
-
-use crate::{work::{WorkData}};
-
 pub struct Camera {
     pub camera_zoom: f64,
     pub camera_x: f64,
@@ -51,21 +47,5 @@ impl Camera {
             velocity_zoom: self.velocity_zoom,
         };
         state
-    }
-
-    pub fn mutate_frame_with_result(frame: &mut [u8], data_transfer_result: Result<(WorkData, Vec<u8>), RecvError>) {
-        match data_transfer_result {
-            Ok((data, result)) => {
-                let start = data.start as usize;
-                let end = (data.start + data.size) as usize;
-
-                let frame_slice: &mut [u8] = &mut frame[start..end];
-
-                frame_slice.copy_from_slice(&result);
-            },
-            Err(_) => {
-                panic!("WorkQueue::get_work() tried to lock a poisoned mutex");
-            }
-        }
     }
 }
