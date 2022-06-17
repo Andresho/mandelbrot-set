@@ -1,5 +1,0 @@
-- Para executar:
-    - configure o rust em sua máquina
-    - entre na raiz do projeto
-    - rode o comando: 
-        - `cargo run`
